@@ -10,13 +10,18 @@
 				if Notification.permission != status
 					Notification.permission = status
 
-	# notificacoes HTML5
-	_showDesktop: (notification) ->
+	notify: (notification) ->
 		if window.Notification && Notification.permission == "granted"
-			getAvatarAsPng notification.payload.sender.username, (avatarImage) ->
+			message = { rid: notification.payload?.rid, msg: notification.text, notification: true }
+			RocketChat.promises.run('onClientMessageReceived', message).then (message) ->
 				n = new Notification notification.title,
-					icon: avatarImage
-					body: _.stripTags(notification.text)
+					icon: notification.icon or getAvatarUrlFromUsername notification.payload.sender.username
+					body: _.stripTags(message.msg)
+					silent: true
+
+				notificationDuration = RocketChat.settings.get('Desktop_Notifications_Duration') * 1000
+				if notificationDuration > 0
+					setTimeout ( -> n.close() ), notificationDuration
 
 				if notification.payload?.rid?
 					n.onclick = ->
@@ -31,10 +36,15 @@
 
 	showDesktop: (notification) ->
 		if not window.document.hasFocus?() and Meteor.user().status isnt 'busy'
-			KonchatNotification._showDesktop(notification)
+			if Meteor.settings.public.sandstorm
+				KonchatNotification.notify(notification)
+			else
+				getAvatarAsPng notification.payload.sender.username, (avatarAsPng) ->
+					notification.icon = avatarAsPng
+					KonchatNotification.notify(notification)
 
 	newMessage: ->
-		unless Session.equals('user_' + Meteor.userId() + '_status', 'busy') or Meteor.user()?.settings?.preferences?.disableNewMessageNotification
+		if not Session.equals('user_' + Meteor.userId() + '_status', 'busy') and Meteor.user()?.settings?.preferences?.newMessageNotification isnt false
 			$('#chatAudioNotification')[0].play()
 
 	newRoom: (rid, withSound = true) ->
@@ -51,17 +61,16 @@
 
 	removeRoomNotification: (rid) ->
 		Tracker.nonreactive ->
-			newRoomSound = Session.get('newRoomSound')
-			newRoomSound = _.without newRoomSound, rid
-			Session.set('newRoomSound', newRoomSound)
+			Session.set('newRoomSound', [])
 
 		$('.link-room-' + rid).removeClass('new-room-highlight')
 
 Tracker.autorun ->
 	if Session.get('newRoomSound')?.length > 0
-		unless Session.equals('user_' + Meteor.userId() + '_status', 'busy') or Meteor.user()?.settings?.preferences?.disableNewRoomNotification
-			$('#chatNewRoomNotification').each ->
-				this.play()
+		Tracker.nonreactive ->
+			if not Session.equals('user_' + Meteor.userId() + '_status', 'busy') and Meteor.user()?.settings?.preferences?.newRoomNotification isnt false
+				$('#chatNewRoomNotification').each ->
+					this.play()
 	else
 		$('#chatNewRoomNotification').each ->
 			this.pause()

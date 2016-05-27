@@ -1,10 +1,50 @@
+/* globals slug:true, slugify, LDAP, getLdapUsername:true, getLdapUserUniqueID:true, getDataToSyncUserData:true, syncUserData:true, sync:true  */
+
 const logger = new Logger('LDAPSync', {});
 
-getLdapUserUniqueID = function getLdapUserUniqueID(ldapUser, fallbackAttribute, fallbackValue) {
+slug = function slug(text) {
+	if (RocketChat.settings.get('UTF8_Names_Slugify') !== true) {
+		return text;
+	}
+	text = slugify(text, '.');
+	return text.replace(/[^0-9a-z-_.]/g, '');
+};
+
+
+getLdapUsername = function getLdapUsername(ldapUser) {
+	let usernameField = RocketChat.settings.get('LDAP_Username_Field');
+
+	if (usernameField.indexOf('#{') > -1) {
+		return usernameField.replace(/#{(.+?)}/g, function(match, field) {
+			return ldapUser.object[field];
+		});
+	}
+
+	return ldapUser.object[usernameField];
+};
+
+
+getLdapUserUniqueID = function getLdapUserUniqueID(ldapUser) {
 	let Unique_Identifier_Field = RocketChat.settings.get('LDAP_Unique_Identifier_Field');
 
 	if (Unique_Identifier_Field !== '') {
-		Unique_Identifier_Field = Unique_Identifier_Field.split(',').find((field) => {
+		Unique_Identifier_Field = Unique_Identifier_Field.replace(/\s/g, '').split(',');
+	} else {
+		Unique_Identifier_Field = [];
+	}
+
+	let LDAP_Domain_Search_User_ID = RocketChat.settings.get('LDAP_Domain_Search_User_ID');
+
+	if (LDAP_Domain_Search_User_ID !== '') {
+		LDAP_Domain_Search_User_ID = LDAP_Domain_Search_User_ID.replace(/\s/g, '').split(',');
+	} else {
+		LDAP_Domain_Search_User_ID = [];
+	}
+
+	Unique_Identifier_Field = Unique_Identifier_Field.concat(LDAP_Domain_Search_User_ID);
+
+	if (Unique_Identifier_Field.length > 0) {
+		Unique_Identifier_Field = Unique_Identifier_Field.find((field) => {
 			return !_.isEmpty(ldapUser.object[field]);
 		});
 		if (Unique_Identifier_Field) {
@@ -13,7 +53,7 @@ getLdapUserUniqueID = function getLdapUserUniqueID(ldapUser, fallbackAttribute, 
 				value: ldapUser.raw[Unique_Identifier_Field].toString('hex')
 			};
 		}
-		return Unique_Identifier_Field || {attribute: fallbackAttribute, value: fallbackValue};
+		return Unique_Identifier_Field;
 	}
 };
 
@@ -35,7 +75,7 @@ getDataToSyncUserData = function getDataToSyncUserData(ldapUser, user) {
 			switch (userField) {
 				case 'email':
 					if (_.isObject(ldapUser.object[ldapField] === 'object')) {
-						_.map(ldapUser.object[ldapField], function (item) {
+						_.map(ldapUser.object[ldapField], function(item) {
 							emailList.push({ address: item, verified: true });
 						});
 					} else {
@@ -57,9 +97,9 @@ getDataToSyncUserData = function getDataToSyncUserData(ldapUser, user) {
 			}
 		}
 
-		const uniqueId = getLdapUserUniqueID(ldapUser, 'username', user.username);
+		const uniqueId = getLdapUserUniqueID(ldapUser);
 
-		if (!user.services || !user.services.ldap || user.services.ldap.id !== uniqueId.value || user.services.ldap.idAttribute !== uniqueId.attribute) {
+		if (uniqueId && (!user.services || !user.services.ldap || user.services.ldap.id !== uniqueId.value || user.services.ldap.idAttribute !== uniqueId.attribute)) {
 			userData['services.ldap.id'] = uniqueId.value;
 			userData['services.ldap.idAttribute'] = uniqueId.attribute;
 		}
@@ -79,7 +119,14 @@ syncUserData = function syncUserData(user, ldapUser) {
 	const userData = getDataToSyncUserData(ldapUser, user);
 	if (user && user._id && userData) {
 		Meteor.users.update(user._id, { $set: userData });
+		user = Meteor.users.findOne({_id: user._id});
 		logger.debug('setting', JSON.stringify(userData, null, 2));
+	}
+
+	const username = slug(getLdapUsername(ldapUser));
+	if (user && user._id && username !== user.username) {
+		logger.info('Syncing user username', user.username, '->', username);
+		RocketChat._setUsername(user._id, username);
 	}
 
 	if (user && user._id && RocketChat.settings.get('LDAP_Sync_User_Avatar') === true) {
@@ -111,7 +158,7 @@ sync = function sync() {
 	try {
 		ldap.connectSync();
 
-		users = RocketChat.models.Users.findLDAPUsers();
+		const users = RocketChat.models.Users.findLDAPUsers();
 
 		users.forEach(function(user) {
 			let ldapUser;
@@ -128,7 +175,7 @@ sync = function sync() {
 				logger.info('Can\'t sync user', user.username);
 			}
 		});
-	} catch(error) {
+	} catch (error) {
 		logger.error(error);
 		return error;
 	}
@@ -138,7 +185,7 @@ sync = function sync() {
 };
 
 let interval;
-let timer;
+let timeout;
 
 RocketChat.settings.get('LDAP_Sync_User_Data', function(key, value) {
 	Meteor.clearInterval(interval);
